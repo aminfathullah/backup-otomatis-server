@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"log"
@@ -11,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	_ "github.com/denisenkom/go-mssqldb"
 	"github.com/joho/godotenv"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
@@ -140,7 +138,7 @@ func processFile(srv *drive.Service, file *drive.File, dbHost, dbUser, dbPass, d
 	log.Println("Database restore completed")
 
 	// Run update query
-	log.Printf("Running update query: %s", updateQuery)
+	// log.Printf("Running update query: %s", updateQuery)
 	err = runUpdateQuery(dbHost, dbUser, dbPass, dbName, updateQuery)
 	if err != nil {
 		return fmt.Errorf("failed to run update query: %v", err)
@@ -149,10 +147,10 @@ func processFile(srv *drive.Service, file *drive.File, dbHost, dbUser, dbPass, d
 
 	// Delete Drive file
 	log.Printf("Deleting file from Google Drive: %s", file.Id)
-	err = srv.Files.Delete(file.Id).Do()
-	if err != nil {
-		return fmt.Errorf("failed to delete Drive file: %v", err)
-	}
+	// err = srv.Files.Delete(file.Id).Do()
+	// if err != nil {
+	// 	return fmt.Errorf("failed to delete Drive file: %v", err)
+	// }
 	log.Println("File deleted from Google Drive")
 
 	log.Printf("Processing completed for file: %s", file.Name)
@@ -202,40 +200,39 @@ func findBakFile(dir string) (string, error) {
 }
 
 func restoreDB(host, user, pass, dbName, bakPath string) error {
-	var connString string
+	args := []string{"-S", host, "-d", "master"}
 	if user == "" && pass == "" {
-		connString = fmt.Sprintf("server=%s;database=master;integrated security=true", host)
+		args = append(args, "-E")
 	} else {
-		connString = fmt.Sprintf("server=%s;user id=%s;password=%s;database=master", host, user, pass)
+		args = append(args, "-U", user, "-P", pass)
 	}
-	log.Printf("Connecting to database with: %s", connString)
-	db, err := sql.Open("sqlserver", connString)
+	query := fmt.Sprintf("RESTORE DATABASE %s FROM DISK = '%s' WITH REPLACE", dbName, bakPath)
+	args = append(args, "-Q", query)
+	// log.Printf("Running sqlcmd with args: %v", args)
+	cmd := exec.Command("sqlcmd", args...)
+	output, err := cmd.CombinedOutput()
+	log.Printf("sqlcmd output: %s", string(output))
 	if err != nil {
+		log.Printf("sqlcmd output: %s", string(output))
 		return err
 	}
-	defer db.Close()
-
-	query := fmt.Sprintf("RESTORE DATABASE %s FROM DISK = '%s' WITH REPLACE", dbName, bakPath)
-	log.Printf("Executing restore query: %s", query)
-	_, err = db.Exec(query)
-	return err
+	return nil
 }
 
 func runUpdateQuery(host, user, pass, dbName, query string) error {
-	var connString string
+	args := []string{"-S", host, "-d", dbName}
 	if user == "" && pass == "" {
-		connString = fmt.Sprintf("server=%s;database=%s;integrated security=true", host, dbName)
+		args = append(args, "-E")
 	} else {
-		connString = fmt.Sprintf("server=%s;user id=%s;password=%s;database=%s", host, user, pass, dbName)
+		args = append(args, "-U", user, "-P", pass)
 	}
-	log.Printf("Connecting to database with: %s", connString)
-	db, err := sql.Open("sqlserver", connString)
+	args = append(args, "-Q", query)
+	// log.Printf("Running sqlcmd with args: %v", args)
+	cmd := exec.Command("sqlcmd", args...)
+	output, err := cmd.CombinedOutput()
 	if err != nil {
+		log.Printf("sqlcmd output: %s", string(output))
 		return err
 	}
-	defer db.Close()
-
-	log.Printf("Executing update query: %s", query)
-	_, err = db.Exec(query)
-	return err
+	return nil
 }
