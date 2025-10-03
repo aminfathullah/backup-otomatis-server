@@ -68,6 +68,15 @@ func main() {
 	}
 	log.Println("All required environment variables are set")
 
+	// Ensure required external tools are available in PATH before proceeding.
+	// This fails fast with a clear message so the operator can fix the environment.
+	if _, err := exec.LookPath("7z"); err != nil {
+		log.Fatalf("7z not found in PATH: %v. Please install 7-Zip and ensure '7z' is available in PATH.", err)
+	}
+	if _, err := exec.LookPath("sqlcmd"); err != nil {
+		log.Fatalf("sqlcmd not found in PATH: %v. Please install SQL Server Command Line Utilities (sqlcmd) and ensure it's available in PATH.", err)
+	}
+
 	// Authenticate with Google Drive and Sheets
 	log.Println("Authenticating with Google Drive and Sheets...")
 	ctx := context.Background()
