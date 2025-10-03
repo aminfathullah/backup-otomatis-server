@@ -63,7 +63,7 @@ func main() {
 
 func getFilesFromFolder(srv *drive.Service) ([]*drive.File, error) {
 	query := "trashed = false and mimeType != 'application/vnd.google-apps.folder' and title contains 'Susenas2025M'"
-	fileList, err := srv.Files.List().Q(query).Fields("files(id, name)").Do()
+	fileList, err := srv.Files.List().Q(query).Fields("files(id, name, createdTime)").OrderBy("createdTime").Do()
 	if err != nil {
 		return nil, err
 	}
