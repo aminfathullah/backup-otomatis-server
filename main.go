@@ -290,19 +290,46 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 		logLogical = dbName + "_log"
 	}
 
+	// Set database to single user mode to close all other connections
+	log.Println("Setting database to single user mode...")
+	query := fmt.Sprintf("ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE;", dbName)
+	argsSingle := append(args, "-Q", query)
+	cmd = exec.Command("sqlcmd", argsSingle...)
+	output, err := cmd.CombinedOutput()
+	log.Printf("sqlcmd output: %s", string(output))
+	if err != nil {
+		return fmt.Errorf("failed to set database to single user: %v", err)
+	}
+	log.Println("Database set to single user mode")
+
 	// Build RESTORE ... WITH MOVE statement
 	mdfTarget := filepath.Join(dataPath, dbName+".mdf")
 	ldfTarget := filepath.Join(dataPath, dbName+"_log.ldf")
-	query := fmt.Sprintf("RESTORE DATABASE %s FROM DISK='%s' WITH REPLACE, MOVE '%s' TO '%s', MOVE '%s' TO '%s'", dbName, bakPath, dataLogical, mdfTarget, logLogical, ldfTarget)
-
-	args = append(args, "-Q", query)
-	cmd = exec.Command("sqlcmd", args...)
-	output, err := cmd.CombinedOutput()
+	query = fmt.Sprintf("RESTORE DATABASE %s FROM DISK='%s' WITH REPLACE, MOVE '%s' TO '%s', MOVE '%s' TO '%s'", dbName, bakPath, dataLogical, mdfTarget, logLogical, ldfTarget)
+	argsRestore := append(args, "-Q", query)
+	cmd = exec.Command("sqlcmd", argsRestore...)
+	output, err = cmd.CombinedOutput()
 	log.Printf("sqlcmd output: %s", string(output))
 	if err != nil {
 		log.Printf("sqlcmd output: %s", string(output))
 		return fmt.Errorf("restore failed: %v", err)
 	}
+	log.Println("Database restore completed")
+
+	// Set database back to multi user mode
+	log.Println("Setting database back to multi user mode...")
+	query = fmt.Sprintf("ALTER DATABASE %s SET MULTI_USER;", dbName)
+	argsMulti := append(args, "-Q", query)
+	cmd = exec.Command("sqlcmd", argsMulti...)
+	output, err = cmd.CombinedOutput()
+	log.Printf("sqlcmd output: %s", string(output))
+	if err != nil {
+		log.Printf("Warning: failed to set database back to multi user: %v", err)
+		// Don't return error, as restore succeeded
+	} else {
+		log.Println("Database set back to multi user mode")
+	}
+
 	return nil
 }
 
