@@ -171,10 +171,10 @@ func processFile(srv *drive.Service, file *drive.File, dbHost, dbUser, dbPass, d
 
 	// Delete Drive file
 	log.Printf("Deleting file from Google Drive: %s", file.Id)
-	// err = srv.Files.Delete(file.Id).Do()
-	// if err != nil {
-	// 	return fmt.Errorf("failed to delete Drive file: %v", err)
-	// }
+	err = srv.Files.Delete(file.Id).Do()
+	if err != nil {
+		return fmt.Errorf("failed to delete Drive file: %v", err)
+	}
 	log.Println("File deleted from Google Drive")
 
 	log.Printf("Processing completed for file: %s", file.Name)
