@@ -18,13 +18,18 @@ import (
 )
 
 func main() {
+	log.Println("Starting backup-otomatis application")
+
 	// Load .env file
+	log.Println("Loading .env file...")
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		log.Fatalf("Error loading .env file: %v", err)
 	}
+	log.Println(".env file loaded successfully")
 
 	// Get environment variables
+	log.Println("Reading environment variables...")
 	dbHost := os.Getenv("DB_HOST")
 	dbUser := os.Getenv("DB_USER")
 	dbPass := os.Getenv("DB_PASS")
@@ -33,89 +38,124 @@ func main() {
 	updateQuery := os.Getenv("UPDATE_QUERY")
 	serviceAccountFile := os.Getenv("SERVICE_ACCOUNT_FILE")
 
+	log.Printf("DB_HOST: %s", dbHost)
+	log.Printf("DB_USER: %s", dbUser)
+	log.Printf("DB_PASS: %s", strings.Repeat("*", len(dbPass))) // Hide password
+	log.Printf("DB_NAME: %s", dbName)
+	log.Printf("SEVENZ_PASSWORD: %s", strings.Repeat("*", len(sevenZPassword)))
+	// log.Printf("UPDATE_QUERY: %s", updateQuery)
+	log.Printf("SERVICE_ACCOUNT_FILE: %s", serviceAccountFile)
+
 	if dbHost == "" || dbName == "" || sevenZPassword == "" || updateQuery == "" || serviceAccountFile == "" {
 		log.Fatal("Missing required environment variables")
 	}
+	log.Println("All required environment variables are set")
 
 	// Authenticate with Google Drive
+	log.Println("Authenticating with Google Drive...")
 	ctx := context.Background()
 	srv, err := drive.NewService(ctx, option.WithCredentialsFile(serviceAccountFile))
 	if err != nil {
 		log.Fatalf("Unable to retrieve Drive client: %v", err)
 	}
+	log.Println("Google Drive authentication successful")
 
 	// Get files from folder
+	log.Println("Retrieving files from Google Drive...")
 	files, err := getFilesFromFolder(srv)
 	if err != nil {
 		log.Fatalf("Unable to get files: %v", err)
 	}
+	log.Printf("Found %d files to process", len(files))
 
 	// Process each file
-	for _, file := range files {
+	for i, file := range files {
+		log.Printf("Processing file %d/%d: %s (ID: %s)", i+1, len(files), file.Name, file.Id)
 		err := processFile(srv, file, dbHost, dbUser, dbPass, dbName, sevenZPassword, updateQuery)
 		if err != nil {
 			log.Printf("Error processing file %s: %v", file.Name, err)
 			continue
 		}
-		log.Printf("Processed file %s successfully", file.Name)
+		log.Printf("Successfully processed file %s", file.Name)
 	}
+
+	log.Println("Backup-otomatis application completed")
 }
 
 func getFilesFromFolder(srv *drive.Service) ([]*drive.File, error) {
-	query := "trashed = false and mimeType != 'application/vnd.google-apps.folder' and title contains 'Susenas2025M'"
+	query := "trashed = false and mimeType != 'application/vnd.google-apps.folder' and name contains 'Susenas2025M'"
+	log.Printf("Executing Drive query: %s", query)
 	fileList, err := srv.Files.List().Q(query).Fields("files(id, name, createdTime)").OrderBy("createdTime").Do()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Drive API error: %v", err)
 	}
+	log.Printf("Drive API returned %d files", len(fileList.Files))
 	return fileList.Files, nil
 }
 
 func processFile(srv *drive.Service, file *drive.File, dbHost, dbUser, dbPass, dbName, password, updateQuery string) error {
+	log.Printf("Starting processing for file: %s", file.Name)
+
 	// Create temp dir
+	log.Println("Creating temporary directory...")
 	tempDir, err := os.MkdirTemp("", "backup-*")
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tempDir)
+	log.Printf("Temporary directory created: %s", tempDir)
 
 	// Download file
 	downloadedFile := filepath.Join(tempDir, file.Name)
+	log.Printf("Downloading file to: %s", downloadedFile)
 	err = downloadFile(srv, file.Id, downloadedFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to download file: %v", err)
 	}
+	log.Println("File downloaded successfully")
 
 	// Extract 7z
 	extractDir := filepath.Join(tempDir, "extracted")
+	log.Printf("Extracting 7z archive to: %s", extractDir)
 	err = extract7z(downloadedFile, extractDir, password)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to extract 7z: %v", err)
 	}
+	log.Println("7z extraction completed")
 
 	// Find .bak file
+	log.Println("Searching for .bak file...")
 	bakFile, err := findBakFile(extractDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to find .bak file: %v", err)
 	}
+	log.Printf("Found .bak file: %s", bakFile)
 
 	// Restore DB
+	log.Printf("Restoring database %s from %s", dbName, bakFile)
 	err = restoreDB(dbHost, dbUser, dbPass, dbName, bakFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to restore database: %v", err)
 	}
+	log.Println("Database restore completed")
 
 	// Run update query
+	log.Printf("Running update query: %s", updateQuery)
 	err = runUpdateQuery(dbHost, dbUser, dbPass, dbName, updateQuery)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to run update query: %v", err)
 	}
+	log.Println("Update query executed successfully")
 
 	// Delete Drive file
+	log.Printf("Deleting file from Google Drive: %s", file.Id)
 	err = srv.Files.Delete(file.Id).Do()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to delete Drive file: %v", err)
 	}
+	log.Println("File deleted from Google Drive")
 
+	log.Printf("Processing completed for file: %s", file.Name)
 	return nil
 }
 
@@ -164,10 +204,11 @@ func findBakFile(dir string) (string, error) {
 func restoreDB(host, user, pass, dbName, bakPath string) error {
 	var connString string
 	if user == "" && pass == "" {
-		connString = fmt.Sprintf("sqlserver://%s?database=master&integrated security=true", host)
+		connString = fmt.Sprintf("server=%s;database=master;integrated security=true", host)
 	} else {
-		connString = fmt.Sprintf("sqlserver://%s:%s@%s?database=master", user, pass, host)
+		connString = fmt.Sprintf("server=%s;user id=%s;password=%s;database=master", host, user, pass)
 	}
+	log.Printf("Connecting to database with: %s", connString)
 	db, err := sql.Open("sqlserver", connString)
 	if err != nil {
 		return err
@@ -175,6 +216,7 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 	defer db.Close()
 
 	query := fmt.Sprintf("RESTORE DATABASE %s FROM DISK = '%s' WITH REPLACE", dbName, bakPath)
+	log.Printf("Executing restore query: %s", query)
 	_, err = db.Exec(query)
 	return err
 }
@@ -182,16 +224,18 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 func runUpdateQuery(host, user, pass, dbName, query string) error {
 	var connString string
 	if user == "" && pass == "" {
-		connString = fmt.Sprintf("sqlserver://%s?database=%s&integrated security=true", host, dbName)
+		connString = fmt.Sprintf("server=%s;database=%s;integrated security=true", host, dbName)
 	} else {
-		connString = fmt.Sprintf("sqlserver://%s:%s@%s?database=%s", user, pass, host, dbName)
+		connString = fmt.Sprintf("server=%s;user id=%s;password=%s;database=%s", host, user, pass, dbName)
 	}
+	log.Printf("Connecting to database with: %s", connString)
 	db, err := sql.Open("sqlserver", connString)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
+	log.Printf("Executing update query: %s", query)
 	_, err = db.Exec(query)
 	return err
 }
