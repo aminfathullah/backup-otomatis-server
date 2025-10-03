@@ -129,13 +129,28 @@ func processFile(srv *drive.Service, file *drive.File, dbHost, dbUser, dbPass, d
 	}
 	log.Printf("Found .bak file: %s", bakFile)
 
-	// Grant permissions to SQL Server service
-	log.Println("Granting permissions to SQL Server service...")
-	cmd := exec.Command("icacls", bakFile, "/grant", "NT SERVICE\\MSSQL$SQL2008R2E:F")
+	// Grant permissions to SQL Server service on the bak file and extracted folder
+	log.Println("Granting permissions to SQL Server service on bak file and folder...")
+	// derive instance name from host if present (e.g., SERVER\INSTANCE)
+	serviceAcct := "NT SERVICE\\MSSQLSERVER"
+	if strings.Contains(dbHost, "\\") {
+		parts := strings.SplitN(dbHost, "\\", 2)
+		instance := parts[1]
+		serviceAcct = "NT SERVICE\\MSSQL$" + instance
+	}
+	// grant on the bak file
+	cmd := exec.Command("icacls", bakFile, "/grant", serviceAcct+":F")
 	err = cmd.Run()
 	if err != nil {
-		log.Printf("Failed to grant permissions: %v", err)
-		// Continue anyway, might still work
+		log.Printf("Failed to grant permissions on bak file: %v", err)
+		// Continue anyway
+	}
+	// also grant on the extract folder (recursive)
+	extractFolder := filepath.Dir(bakFile)
+	cmd = exec.Command("icacls", extractFolder, "/grant", serviceAcct+":F", "/T")
+	err = cmd.Run()
+	if err != nil {
+		log.Printf("Failed to grant permissions on extract folder: %v", err)
 	}
 
 	// Restore DB
@@ -215,15 +230,78 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 	} else {
 		args = append(args, "-U", user, "-P", pass)
 	}
-	query := fmt.Sprintf("RESTORE DATABASE %s FROM DISK = '%s' WITH REPLACE", dbName, bakPath)
+
+	// First, get logical file names from the backup using RESTORE FILELISTONLY
+	argsList := append(args, "-h", "-1", "-W", "-s", "|", "-Q", fmt.Sprintf("SET NOCOUNT ON; RESTORE FILELISTONLY FROM DISK='%s'", bakPath))
+	cmd := exec.Command("sqlcmd", argsList...)
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to run RESTORE FILELISTONLY: %v", err)
+	}
+	listOut := strings.TrimSpace(string(out))
+	var dataLogical, logLogical string
+	if listOut != "" {
+		lines := strings.Split(listOut, "\n")
+		for _, l := range lines {
+			l = strings.TrimSpace(l)
+			if l == "" {
+				continue
+			}
+			cols := strings.Split(l, "|")
+			for i := range cols {
+				cols[i] = strings.TrimSpace(cols[i])
+			}
+			if len(cols) < 3 {
+				continue
+			}
+			typ := strings.ToUpper(cols[2])
+			if strings.HasPrefix(typ, "L") {
+				logLogical = cols[0]
+			} else {
+				// treat as data
+				dataLogical = cols[0]
+			}
+		}
+	}
+
+	// Next, query the instance default data path. Use SET NOCOUNT ON and suppress headers/rowcounts.
+	argsPath := append(args, "-h", "-1", "-W", "-Q", "SET NOCOUNT ON; SELECT SERVERPROPERTY('InstanceDefaultDataPath')")
+	cmd = exec.Command("sqlcmd", argsPath...)
+	out, err = cmd.Output()
+	if err != nil {
+		// If we can't get the instance path, fall back to the backup's directory
+		log.Printf("warning: failed to get instance data path: %v", err)
+	}
+	dataPath := strings.TrimSpace(string(out))
+	// sqlcmd may return the literal "NULL" when the property is not set.
+	if dataPath == "" || strings.EqualFold(dataPath, "NULL") {
+		// fallback to directory of the .bak file
+		dataPath = filepath.Dir(bakPath)
+		log.Printf("Data path empty or NULL, falling back to bak directory: %s", dataPath)
+	} else {
+		log.Printf("Data path: %s", dataPath)
+	}
+
+	// Use detected logical names or sensible defaults
+	if dataLogical == "" {
+		dataLogical = dbName
+	}
+	if logLogical == "" {
+		logLogical = dbName + "_log"
+	}
+
+	// Build RESTORE ... WITH MOVE statement
+	mdfTarget := filepath.Join(dataPath, dbName+".mdf")
+	ldfTarget := filepath.Join(dataPath, dbName+"_log.ldf")
+	query := fmt.Sprintf("RESTORE DATABASE %s FROM DISK='%s' WITH REPLACE, MOVE '%s' TO '%s', MOVE '%s' TO '%s'", dbName, bakPath, dataLogical, mdfTarget, logLogical, ldfTarget)
+
 	args = append(args, "-Q", query)
-	// log.Printf("Running sqlcmd with args: %v", args)
-	cmd := exec.Command("sqlcmd", args...)
+	cmd = exec.Command("sqlcmd", args...)
 	output, err := cmd.CombinedOutput()
 	log.Printf("sqlcmd output: %s", string(output))
 	if err != nil {
 		log.Printf("sqlcmd output: %s", string(output))
-		return err
+		return fmt.Errorf("restore failed: %v", err)
 	}
 	return nil
 }
