@@ -39,9 +39,9 @@ The application will:
 
 Edit the `.env` file with your settings:
 
-- `DB_HOST`: SQL Server host
-- `DB_USER`: Database username
-- `DB_PASS`: Database password
+- `DB_HOST`: SQL Server host (e.g., `localhost\SQLEXPRESS`)
+- `DB_USER`: Database username (leave empty for Windows Authentication)
+- `DB_PASS`: Database password (leave empty for Windows Authentication)
 - `DB_NAME`: Database name to restore to
 - `DRIVE_FOLDER_ID`: Google Drive folder ID containing the backup files
 - `SERVICE_ACCOUNT_FILE`: Path to service account JSON file

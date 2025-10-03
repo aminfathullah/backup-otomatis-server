@@ -34,7 +34,7 @@ func main() {
 	updateQuery := os.Getenv("UPDATE_QUERY")
 	serviceAccountFile := os.Getenv("SERVICE_ACCOUNT_FILE")
 
-	if dbHost == "" || dbUser == "" || dbPass == "" || dbName == "" || driveFolderID == "" || sevenZPassword == "" || updateQuery == "" || serviceAccountFile == "" {
+	if dbHost == "" || dbName == "" || driveFolderID == "" || sevenZPassword == "" || updateQuery == "" || serviceAccountFile == "" {
 		log.Fatal("Missing required environment variables")
 	}
 
@@ -163,7 +163,12 @@ func findBakFile(dir string) (string, error) {
 }
 
 func restoreDB(host, user, pass, dbName, bakPath string) error {
-	connString := fmt.Sprintf("sqlserver://%s:%s@%s?database=master", user, pass, host)
+	var connString string
+	if user == "" && pass == "" {
+		connString = fmt.Sprintf("sqlserver://%s?database=master&integrated security=true", host)
+	} else {
+		connString = fmt.Sprintf("sqlserver://%s:%s@%s?database=master", user, pass, host)
+	}
 	db, err := sql.Open("sqlserver", connString)
 	if err != nil {
 		return err
@@ -176,7 +181,12 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 }
 
 func runUpdateQuery(host, user, pass, dbName, query string) error {
-	connString := fmt.Sprintf("sqlserver://%s:%s@%s?database=%s", user, pass, host, dbName)
+	var connString string
+	if user == "" && pass == "" {
+		connString = fmt.Sprintf("sqlserver://%s?database=%s&integrated security=true", host, dbName)
+	} else {
+		connString = fmt.Sprintf("sqlserver://%s:%s@%s?database=%s", user, pass, host, dbName)
+	}
 	db, err := sql.Open("sqlserver", connString)
 	if err != nil {
 		return err
