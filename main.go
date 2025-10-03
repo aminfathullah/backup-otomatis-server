@@ -129,6 +129,15 @@ func processFile(srv *drive.Service, file *drive.File, dbHost, dbUser, dbPass, d
 	}
 	log.Printf("Found .bak file: %s", bakFile)
 
+	// Grant permissions to SQL Server service
+	log.Println("Granting permissions to SQL Server service...")
+	cmd := exec.Command("icacls", bakFile, "/grant", "NT SERVICE\\MSSQL$SQL2008R2E:F")
+	err = cmd.Run()
+	if err != nil {
+		log.Printf("Failed to grant permissions: %v", err)
+		// Continue anyway, might still work
+	}
+
 	// Restore DB
 	log.Printf("Restoring database %s from %s", dbName, bakFile)
 	err = restoreDB(dbHost, dbUser, dbPass, dbName, bakFile)
