@@ -29,12 +29,11 @@ func main() {
 	dbUser := os.Getenv("DB_USER")
 	dbPass := os.Getenv("DB_PASS")
 	dbName := os.Getenv("DB_NAME")
-	driveFolderID := os.Getenv("DRIVE_FOLDER_ID")
 	sevenZPassword := os.Getenv("SEVENZ_PASSWORD")
 	updateQuery := os.Getenv("UPDATE_QUERY")
 	serviceAccountFile := os.Getenv("SERVICE_ACCOUNT_FILE")
 
-	if dbHost == "" || dbName == "" || driveFolderID == "" || sevenZPassword == "" || updateQuery == "" || serviceAccountFile == "" {
+	if dbHost == "" || dbName == "" || sevenZPassword == "" || updateQuery == "" || serviceAccountFile == "" {
 		log.Fatal("Missing required environment variables")
 	}
 
@@ -46,7 +45,7 @@ func main() {
 	}
 
 	// Get files from folder
-	files, err := getFilesFromFolder(srv, driveFolderID)
+	files, err := getFilesFromFolder(srv)
 	if err != nil {
 		log.Fatalf("Unable to get files: %v", err)
 	}
@@ -62,8 +61,8 @@ func main() {
 	}
 }
 
-func getFilesFromFolder(srv *drive.Service, folderID string) ([]*drive.File, error) {
-	query := fmt.Sprintf("'%s' in parents and trashed = false", folderID)
+func getFilesFromFolder(srv *drive.Service) ([]*drive.File, error) {
+	query := "trashed = false and mimeType != 'application/vnd.google-apps.folder' and title contains 'Susenas2025M'"
 	fileList, err := srv.Files.List().Q(query).Fields("files(id, name)").Do()
 	if err != nil {
 		return nil, err
