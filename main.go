@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"google.golang.org/api/drive/v3"
@@ -128,6 +129,19 @@ func processFile(srv *drive.Service, file *drive.File, dbHost, dbUser, dbPass, d
 	log.Printf("Extracting 7z archive to: %s", extractDir)
 	err = extract7z(downloadedFile, extractDir, password)
 	if err != nil {
+		if createdTime, err := time.Parse(time.RFC3339, file.CreatedTime); err != nil {
+			log.Printf("Error parsing created time for %s: %v, proceeding with deletion", file.Name, err)
+		} else if time.Since(createdTime) >= 10*time.Minute {
+			// Delete Drive file
+			log.Printf("Deleting file from Google Drive: %s", file.Id)
+			err = srv.Files.Delete(file.Id).Do()
+			if err != nil {
+				return fmt.Errorf("failed to delete Drive file: %v", err)
+			}
+			log.Println("File deleted from Google Drive")
+		} else {
+			log.Printf("File %s is less than 10 minutes old, skipping deletion", file.Name)
+		}
 		return fmt.Errorf("failed to extract 7z: %v", err)
 	}
 	log.Println("7z extraction completed")
@@ -180,7 +194,6 @@ func processFile(srv *drive.Service, file *drive.File, dbHost, dbUser, dbPass, d
 	}
 	log.Println("Update query executed successfully")
 
-	// Delete Drive file
 	log.Printf("Deleting file from Google Drive: %s", file.Id)
 	err = srv.Files.Delete(file.Id).Do()
 	if err != nil {
