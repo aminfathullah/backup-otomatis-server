@@ -14,6 +14,7 @@ import (
 	"github.com/joho/godotenv"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
+	"google.golang.org/api/sheets/v4"
 )
 
 func main() {
@@ -50,14 +51,18 @@ func main() {
 	}
 	log.Println("All required environment variables are set")
 
-	// Authenticate with Google Drive
-	log.Println("Authenticating with Google Drive...")
+	// Authenticate with Google Drive and Sheets
+	log.Println("Authenticating with Google Drive and Sheets...")
 	ctx := context.Background()
 	srv, err := drive.NewService(ctx, option.WithCredentialsFile(serviceAccountFile))
 	if err != nil {
 		log.Fatalf("Unable to retrieve Drive client: %v", err)
 	}
-	log.Println("Google Drive authentication successful")
+	sheetsSrv, err := sheets.NewService(ctx, option.WithCredentialsFile(serviceAccountFile))
+	if err != nil {
+		log.Fatalf("Unable to retrieve Sheets client: %v", err)
+	}
+	log.Println("Google Drive and Sheets authentication successful")
 
 	// Get files from folder
 	log.Println("Retrieving files from Google Drive...")
@@ -70,7 +75,11 @@ func main() {
 	// Process each file
 	for i, file := range files {
 		log.Printf("Processing file %d/%d: %s (ID: %s)", i+1, len(files), file.Name, file.Id)
-		err := processFile(srv, file, dbHost, dbUser, dbPass, dbName, sevenZPassword, updateQuery)
+		spreadsheetID := os.Getenv("SPREADSHEET_ID")
+		if spreadsheetID == "" {
+			log.Fatal("Missing SPREADSHEET_ID environment variable")
+		}
+		err := processFile(srv, sheetsSrv, spreadsheetID, file, dbHost, dbUser, dbPass, dbName, sevenZPassword, updateQuery)
 		if err != nil {
 			log.Printf("Error processing file %s: %v", file.Name, err)
 			continue
@@ -84,7 +93,7 @@ func main() {
 func getFilesFromFolder(srv *drive.Service) ([]*drive.File, error) {
 	query := "trashed = false and mimeType != 'application/vnd.google-apps.folder' and name contains 'Susenas2025M'"
 	log.Printf("Executing Drive query: %s", query)
-	fileList, err := srv.Files.List().Q(query).Fields("files(id, name, createdTime, size)").OrderBy("createdTime").Do()
+	fileList, err := srv.Files.List().Q(query).Fields("files(id, name, createdTime, size, parents)").OrderBy("createdTime").Do()
 	if err != nil {
 		return nil, fmt.Errorf("Drive API error: %v", err)
 	}
@@ -92,16 +101,16 @@ func getFilesFromFolder(srv *drive.Service) ([]*drive.File, error) {
 	return fileList.Files, nil
 }
 
-func processFile(srv *drive.Service, file *drive.File, dbHost, dbUser, dbPass, dbName, password, updateQuery string) error {
+func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID string, file *drive.File, dbHost, dbUser, dbPass, dbName, password, updateQuery string) error {
 	log.Printf("Starting processing for file: %s", file.Name)
 
 	// Check file size
 	if file.Size < 10*1024 {
 		log.Printf("File %s is smaller than 10KB (%d bytes), deleting from Drive", file.Name, file.Size)
-		err := srv.Files.Delete(file.Id).Do()
-		if err != nil {
-			return fmt.Errorf("failed to delete small file: %v", err)
-		}
+		// err := srv.Files.Delete(file.Id).Do()
+		// if err != nil {
+		// 	return fmt.Errorf("failed to delete small file: %v", err)
+		// }
 		log.Println("Small file deleted from Google Drive")
 		return nil
 	}
@@ -134,11 +143,25 @@ func processFile(srv *drive.Service, file *drive.File, dbHost, dbUser, dbPass, d
 		} else if time.Since(createdTime) >= 10*time.Minute {
 			// Delete Drive file
 			log.Printf("Deleting file from Google Drive: %s", file.Id)
-			err = srv.Files.Delete(file.Id).Do()
-			if err != nil {
-				return fmt.Errorf("failed to delete Drive file: %v", err)
-			}
+			// err = srv.Files.Delete(file.Id).Do()
+			// if err != nil {
+			// 	return fmt.Errorf("failed to delete Drive file: %v", err)
+			// }
 			log.Println("File deleted from Google Drive")
+
+			// Update spreadsheet: find parent folder name and write created time to Susenas column (B) for the row matching Kab (A)
+			parentName, pErr := getParentFolderName(srv, file)
+			log.Printf("Parent folder name: %s", parentName)
+			if pErr != nil {
+				log.Printf("Warning: failed to get parent folder name: %v", pErr)
+			} else {
+				createdTime := file.CreatedTime
+				if uErr := upsertSpreadsheetRow(sheetsSrv, spreadsheetID, parentName, createdTime); uErr != nil {
+					log.Printf("Warning: failed to update spreadsheet: %v", uErr)
+				} else {
+					log.Printf("Spreadsheet updated for Kab=%s with Susenas=%s", parentName, createdTime)
+				}
+			}
 		} else {
 			log.Printf("File %s is less than 10 minutes old, skipping deletion", file.Name)
 		}
@@ -195,11 +218,25 @@ func processFile(srv *drive.Service, file *drive.File, dbHost, dbUser, dbPass, d
 	log.Println("Update query executed successfully")
 
 	log.Printf("Deleting file from Google Drive: %s", file.Id)
-	err = srv.Files.Delete(file.Id).Do()
-	if err != nil {
-		return fmt.Errorf("failed to delete Drive file: %v", err)
-	}
+	// err = srv.Files.Delete(file.Id).Do()
+	// if err != nil {
+	// 	return fmt.Errorf("failed to delete Drive file: %v", err)
+	// }
 	log.Println("File deleted from Google Drive")
+
+	// Update spreadsheet: find parent folder name and write created time to Susenas column (B) for the row matching Kab (A)
+	parentName, pErr := getParentFolderName(srv, file)
+	log.Printf("Parent folder name: %s", parentName)
+	if pErr != nil {
+		log.Printf("Warning: failed to get parent folder name: %v", pErr)
+	} else {
+		createdTime := file.CreatedTime
+		if uErr := upsertSpreadsheetRow(sheetsSrv, spreadsheetID, parentName, createdTime); uErr != nil {
+			log.Printf("Warning: failed to update spreadsheet: %v", uErr)
+		} else {
+			log.Printf("Spreadsheet updated for Kab=%s with Susenas=%s", parentName, createdTime)
+		}
+	}
 
 	log.Printf("Processing completed for file: %s", file.Name)
 	return nil
@@ -371,6 +408,80 @@ func runUpdateQuery(host, user, pass, dbName, query string) error {
 	if err != nil {
 		log.Printf("sqlcmd output: %s", string(output))
 		return err
+	}
+	return nil
+}
+
+// getParentFolderName returns the name of the first parent folder for the file (or empty string)
+func getParentFolderName(srv *drive.Service, file *drive.File) (string, error) {
+	if file.Parents != nil && len(file.Parents) > 0 {
+		parentID := file.Parents[0]
+		f, err := srv.Files.Get(parentID).Fields("id, name").Do()
+		if err != nil {
+			return "", err
+		}
+		return f.Name, nil
+	}
+	// fallback: try to retrieve parents via drive API
+	fi, err := srv.Files.Get(file.Id).Fields("parents").Do()
+	if err != nil {
+		return "", err
+	}
+	if fi.Parents != nil && len(fi.Parents) > 0 {
+		p, err := srv.Files.Get(fi.Parents[0]).Fields("name").Do()
+		if err != nil {
+			return "", err
+		}
+		return p.Name, nil
+	}
+	return "", nil
+}
+
+// upsertSpreadsheetRow finds a row where column A == kab and sets column B to createdTime (RFC3339 string).
+// If no row matches, it appends a new row [kab, createdTime].
+func upsertSpreadsheetRow(srv *sheets.Service, spreadsheetID, kab, createdTime string) error {
+	// Read the sheet values (assume sheet1, columns A:B)
+	readRange := "A:B"
+	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, readRange).Do()
+	if err != nil {
+		return fmt.Errorf("failed to read spreadsheet: %v", err)
+	}
+	log.Printf("Spreadsheet returned %d rows", len(resp.Values))
+
+	// Search for kab in column A
+	rowIndex := -1
+	if resp.Values != nil {
+		for i, row := range resp.Values {
+			if len(row) > 0 {
+				if s, ok := row[0].(string); ok && strings.TrimSpace(s) == strings.TrimSpace(kab) {
+					rowIndex = i // 0-based index in resp.Values
+					break
+				}
+			}
+		}
+	}
+
+	if rowIndex >= 0 {
+		// Update cell in column B at rowIndex+1 (Sheets rows are 1-based)
+		a1 := fmt.Sprintf("B%d", rowIndex+1)
+		vr := &sheets.ValueRange{
+			Range:  a1,
+			Values: [][]interface{}{{createdTime}},
+		}
+		_, err = srv.Spreadsheets.Values.Update(spreadsheetID, a1, vr).ValueInputOption("RAW").Do()
+		if err != nil {
+			return fmt.Errorf("failed to update spreadsheet cell %s: %v", a1, err)
+		}
+		return nil
+	}
+
+	// Append new row
+	vr := &sheets.ValueRange{
+		Values: [][]interface{}{{kab, createdTime}},
+	}
+	_, err = srv.Spreadsheets.Values.Append(spreadsheetID, "A:B", vr).ValueInputOption("RAW").InsertDataOption("INSERT_ROWS").Do()
+	if err != nil {
+		return fmt.Errorf("failed to append row to spreadsheet: %v", err)
 	}
 	return nil
 }
