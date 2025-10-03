@@ -107,10 +107,10 @@ func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID st
 	// Check file size
 	if file.Size < 10*1024 {
 		log.Printf("File %s is smaller than 10KB (%d bytes), deleting from Drive", file.Name, file.Size)
-		// err := srv.Files.Delete(file.Id).Do()
-		// if err != nil {
-		// 	return fmt.Errorf("failed to delete small file: %v", err)
-		// }
+		err := srv.Files.Delete(file.Id).Do()
+		if err != nil {
+			return fmt.Errorf("failed to delete small file: %v", err)
+		}
 		log.Println("Small file deleted from Google Drive")
 		return nil
 	}
@@ -143,10 +143,10 @@ func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID st
 		} else if time.Since(createdTime) >= 10*time.Minute {
 			// Delete Drive file
 			log.Printf("Deleting file from Google Drive: %s", file.Id)
-			// err = srv.Files.Delete(file.Id).Do()
-			// if err != nil {
-			// 	return fmt.Errorf("failed to delete Drive file: %v", err)
-			// }
+			err = srv.Files.Delete(file.Id).Do()
+			if err != nil {
+				return fmt.Errorf("failed to delete Drive file: %v", err)
+			}
 			log.Println("File deleted from Google Drive")
 
 			// Update spreadsheet: find parent folder name and write created time to Susenas column (B) for the row matching Kab (A)
@@ -155,8 +155,27 @@ func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID st
 			if pErr != nil {
 				log.Printf("Warning: failed to get parent folder name: %v", pErr)
 			} else {
-				createdTime := file.CreatedTime
-				if uErr := upsertSpreadsheetRow(sheetsSrv, spreadsheetID, parentName, createdTime); uErr != nil {
+				var createdStr string
+				if t, perr := time.Parse(time.RFC3339, file.CreatedTime); perr == nil {
+					// pick timezone from environment or use local
+					tz := os.Getenv("SPREADSHEET_TIMEZONE")
+					var loc *time.Location
+					if tz == "" || strings.EqualFold(tz, "Local") {
+						loc = time.Local
+					} else {
+						l, lerr := time.LoadLocation(tz)
+						if lerr != nil {
+							log.Printf("warning: unable to load timezone %s: %v, using Local", tz, lerr)
+							loc = time.Local
+						} else {
+							loc = l
+						}
+					}
+					createdStr = t.In(loc).Format("1/2/2006 15:04:05")
+				} else {
+					createdStr = file.CreatedTime
+				}
+				if uErr := upsertSpreadsheetRow(sheetsSrv, spreadsheetID, parentName, createdStr); uErr != nil {
 					log.Printf("Warning: failed to update spreadsheet: %v", uErr)
 				} else {
 					log.Printf("Spreadsheet updated for Kab=%s with Susenas=%s", parentName, createdTime)
@@ -218,10 +237,10 @@ func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID st
 	log.Println("Update query executed successfully")
 
 	log.Printf("Deleting file from Google Drive: %s", file.Id)
-	// err = srv.Files.Delete(file.Id).Do()
-	// if err != nil {
-	// 	return fmt.Errorf("failed to delete Drive file: %v", err)
-	// }
+	err = srv.Files.Delete(file.Id).Do()
+	if err != nil {
+		return fmt.Errorf("failed to delete Drive file: %v", err)
+	}
 	log.Println("File deleted from Google Drive")
 
 	// Update spreadsheet: find parent folder name and write created time to Susenas column (B) for the row matching Kab (A)
@@ -230,11 +249,29 @@ func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID st
 	if pErr != nil {
 		log.Printf("Warning: failed to get parent folder name: %v", pErr)
 	} else {
-		createdTime := file.CreatedTime
-		if uErr := upsertSpreadsheetRow(sheetsSrv, spreadsheetID, parentName, createdTime); uErr != nil {
+		var createdStr string
+		if t, perr := time.Parse(time.RFC3339, file.CreatedTime); perr == nil {
+			tz := os.Getenv("SPREADSHEET_TIMEZONE")
+			var loc *time.Location
+			if tz == "" || strings.EqualFold(tz, "Local") {
+				loc = time.Local
+			} else {
+				l, lerr := time.LoadLocation(tz)
+				if lerr != nil {
+					log.Printf("warning: unable to load timezone %s: %v, using Local", tz, lerr)
+					loc = time.Local
+				} else {
+					loc = l
+				}
+			}
+			createdStr = t.In(loc).Format("1/2/2006 15:04:05")
+		} else {
+			createdStr = file.CreatedTime
+		}
+		if uErr := upsertSpreadsheetRow(sheetsSrv, spreadsheetID, parentName, createdStr); uErr != nil {
 			log.Printf("Warning: failed to update spreadsheet: %v", uErr)
 		} else {
-			log.Printf("Spreadsheet updated for Kab=%s with Susenas=%s", parentName, createdTime)
+			log.Printf("Spreadsheet updated for Kab=%s with Susenas=%s", parentName, createdStr)
 		}
 	}
 
@@ -468,7 +505,7 @@ func upsertSpreadsheetRow(srv *sheets.Service, spreadsheetID, kab, createdTime s
 			Range:  a1,
 			Values: [][]interface{}{{createdTime}},
 		}
-		_, err = srv.Spreadsheets.Values.Update(spreadsheetID, a1, vr).ValueInputOption("RAW").Do()
+		_, err = srv.Spreadsheets.Values.Update(spreadsheetID, a1, vr).ValueInputOption("USER_ENTERED").Do()
 		if err != nil {
 			return fmt.Errorf("failed to update spreadsheet cell %s: %v", a1, err)
 		}
@@ -479,7 +516,7 @@ func upsertSpreadsheetRow(srv *sheets.Service, spreadsheetID, kab, createdTime s
 	vr := &sheets.ValueRange{
 		Values: [][]interface{}{{kab, createdTime}},
 	}
-	_, err = srv.Spreadsheets.Values.Append(spreadsheetID, "A:B", vr).ValueInputOption("RAW").InsertDataOption("INSERT_ROWS").Do()
+	_, err = srv.Spreadsheets.Values.Append(spreadsheetID, "A:B", vr).ValueInputOption("USER_ENTERED").InsertDataOption("INSERT_ROWS").Do()
 	if err != nil {
 		return fmt.Errorf("failed to append row to spreadsheet: %v", err)
 	}
