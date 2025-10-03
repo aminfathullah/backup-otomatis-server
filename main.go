@@ -83,7 +83,7 @@ func main() {
 func getFilesFromFolder(srv *drive.Service) ([]*drive.File, error) {
 	query := "trashed = false and mimeType != 'application/vnd.google-apps.folder' and name contains 'Susenas2025M'"
 	log.Printf("Executing Drive query: %s", query)
-	fileList, err := srv.Files.List().Q(query).Fields("files(id, name, createdTime)").OrderBy("createdTime").Do()
+	fileList, err := srv.Files.List().Q(query).Fields("files(id, name, createdTime, size)").OrderBy("createdTime").Do()
 	if err != nil {
 		return nil, fmt.Errorf("Drive API error: %v", err)
 	}
@@ -93,6 +93,17 @@ func getFilesFromFolder(srv *drive.Service) ([]*drive.File, error) {
 
 func processFile(srv *drive.Service, file *drive.File, dbHost, dbUser, dbPass, dbName, password, updateQuery string) error {
 	log.Printf("Starting processing for file: %s", file.Name)
+
+	// Check file size
+	if file.Size < 10*1024 {
+		log.Printf("File %s is smaller than 10KB (%d bytes), deleting from Drive", file.Name, file.Size)
+		err := srv.Files.Delete(file.Id).Do()
+		if err != nil {
+			return fmt.Errorf("failed to delete small file: %v", err)
+		}
+		log.Println("Small file deleted from Google Drive")
+		return nil
+	}
 
 	// Create temp dir
 	log.Println("Creating temporary directory...")
