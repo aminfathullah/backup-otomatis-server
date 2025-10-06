@@ -63,7 +63,7 @@ func main() {
 	log.Printf("SERVICE_ACCOUNT_FILE: %s", serviceAccountFile)
 	log.Printf("SPREADSHEET_ID: %s", spreadsheetID)
 
-	if dbHost == "" || dbUser == "" || dbPass == "" || dbName == "" || sevenZPassword == "" || updateQuery == "" || serviceAccountFile == "" || spreadsheetID == "" {
+	if dbHost == "" || dbName == "" || sevenZPassword == "" || updateQuery == "" || serviceAccountFile == "" || spreadsheetID == "" {
 		log.Fatal("Missing required environment variables")
 	}
 	log.Println("All required environment variables are set")
@@ -253,23 +253,23 @@ func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID st
 }
 func deleteSmallFile(srv *drive.Service, file *drive.File) error {
 	log.Printf("File %s is smaller than 10KB (%d bytes), deleting from Drive", file.Name, file.Size)
-	err := srv.Files.Delete(file.Id).Do()
-	// deleteFileAndUpdateSpreadsheet deletes a file from Google Drive and updates the tracking spreadsheet.
-	//
-	// It retrieves the parent folder name, formats the creation time, and either updates an existing
-	// row in the spreadsheet or appends a new one.
-	//
-	// Parameters:
-	//   - srv: Google Drive service client.
-	//   - sheetsSrv: Google Sheets service client.
-	//   - spreadsheetID: ID of the Google Sheet.
-	//   - file: the file being processed.
-	//
-	// Returns:
-	//   - error: any error encountered during deletion or spreadsheet update.
-	if err != nil {
-		return fmt.Errorf("failed to delete small file: %v", err)
-	}
+	// err := srv.Files.Delete(file.Id).Do()
+	// // deleteFileAndUpdateSpreadsheet deletes a file from Google Drive and updates the tracking spreadsheet.
+	// //
+	// // It retrieves the parent folder name, formats the creation time, and either updates an existing
+	// // row in the spreadsheet or appends a new one.
+	// //
+	// // Parameters:
+	// //   - srv: Google Drive service client.
+	// //   - sheetsSrv: Google Sheets service client.
+	// //   - spreadsheetID: ID of the Google Sheet.
+	// //   - file: the file being processed.
+	// //
+	// // Returns:
+	// //   - error: any error encountered during deletion or spreadsheet update.
+	// if err != nil {
+	// 	return fmt.Errorf("failed to delete small file: %v", err)
+	// }
 	log.Println("Small file deleted from Google Drive")
 	return nil
 }
@@ -405,10 +405,10 @@ func formatCreatedTime(createdTimeStr string) string {
 
 func deleteFileAndUpdateSpreadsheet(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID string, file *drive.File) error {
 	log.Printf("Deleting file from Google Drive: %s", file.Id)
-	err := srv.Files.Delete(file.Id).Do()
-	if err != nil {
-		return fmt.Errorf("failed to delete Drive file: %v", err)
-	}
+	// err := srv.Files.Delete(file.Id).Do()
+	// if err != nil {
+	// 	return fmt.Errorf("failed to delete Drive file: %v", err)
+	// }
 	log.Println("File deleted from Google Drive")
 
 	parentName, pErr := getParentFolderName(srv, file)
