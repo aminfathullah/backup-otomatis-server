@@ -59,7 +59,7 @@ func main() {
 	log.Printf("DB_PASS: %s", strings.Repeat("*", len(dbPass))) // Hide password
 	log.Printf("DB_NAME: %s", dbName)
 	log.Printf("SEVENZ_PASSWORD: %s", strings.Repeat("*", len(sevenZPassword)))
-	// log.Printf("UPDATE_QUERY: %s", updateQuery)
+
 	log.Printf("SERVICE_ACCOUNT_FILE: %s", serviceAccountFile)
 	log.Printf("SPREADSHEET_ID: %s", spreadsheetID)
 
@@ -104,40 +104,16 @@ func main() {
 		err := processFile(srv, sheetsSrv, spreadsheetID, file, dbHost, dbUser, dbPass, dbName, sevenZPassword, updateQuery)
 		if err != nil {
 			log.Printf("Error processing file %s: %v", file.Name, err)
-			// getFilesFromFolder retrieves a list of files from the specified Google Drive folder.
-			//
-			// It queries Google Drive for files that are not trashed, not folders, and contain 'Susenas2025M'
-			// in their name. Files are ordered by creation time.
-			//
-			// Parameters:
-			//   - srv: authenticated Google Drive service client.
-			//
-			// Returns:
-			//   - []*drive.File: slice of Google Drive file objects.
-			//   - error: any error encountered during the API call.
-			// processFile handles the complete processing workflow for a single Google Drive file.
-			//
-			// It checks file size, downloads and extracts if valid, grants permissions,
-			// restores the database, runs update queries, and cleans up by deleting the file
-			// and updating the spreadsheet.
-			//
-			// Parameters:
-			//   - srv: Google Drive service client.
-			//   - sheetsSrv: Google Sheets service client.
-			//   - spreadsheetID: ID of the Google Sheet for tracking.
-			//   - file: the Google Drive file to process.
-			//   - dbHost: SQL Server host.
-			//   - dbUser: database username.
-			//   - dbPass: database password.
-			//   - dbName: target database name.
-			//   - password: 7z archive password.
-			//   - updateQuery: SQL query to run after restore.
-			//
-			// Returns:
-			//   - error: any error encountered during processing.
 			continue
 		}
 		log.Printf("Successfully processed file %s", file.Name)
+
+		// After successful processing, drop the restored database to free space.
+		if derr := dropDatabase(dbHost, dbUser, dbPass, dbName); derr != nil {
+			log.Printf("Warning: failed to drop database %s after processing %s: %v", dbName, file.Name, derr)
+		} else {
+			log.Printf("Dropped database %s after processing %s", dbName, file.Name)
+		}
 	}
 
 	log.Println("Backup-otomatis application completed")
@@ -559,27 +535,15 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 	}
 
 	// Set database to single user mode to close all other connections
-	log.Println("Setting database to single user mode...")
-	query := fmt.Sprintf("ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE;", dbName)
-	argsSingle := append(args, "-Q", query)
-	cmd = exec.Command("sqlcmd", argsSingle...)
-	output, err := cmd.CombinedOutput()
-	log.Printf("sqlcmd output: %s", string(output))
-	if err != nil {
-		return fmt.Errorf("failed to set database to single user: %v", err)
-	}
-	if has, txt := sqlOutputHasError(output); has {
-		return fmt.Errorf("failed to set database to single user (sqlcmd messages): %s", txt)
-	}
-	log.Println("Database set to single user mode")
+	// Database set to single user mode is handled by caller if needed
 
 	// Build RESTORE ... WITH MOVE statement
 	mdfTarget := filepath.Join(dataPath, dbName+".mdf")
 	ldfTarget := filepath.Join(dataPath, dbName+"_log.ldf")
-	query = fmt.Sprintf("RESTORE DATABASE %s FROM DISK='%s' WITH REPLACE, MOVE '%s' TO '%s', MOVE '%s' TO '%s'", dbName, bakPath, dataLogical, mdfTarget, logLogical, ldfTarget)
+	query := fmt.Sprintf("RESTORE DATABASE %s FROM DISK='%s' WITH REPLACE, MOVE '%s' TO '%s', MOVE '%s' TO '%s'", dbName, bakPath, dataLogical, mdfTarget, logLogical, ldfTarget)
 	argsRestore := append(args, "-Q", query)
 	cmd = exec.Command("sqlcmd", argsRestore...)
-	output, err = cmd.CombinedOutput()
+	output, err := cmd.CombinedOutput()
 	log.Printf("sqlcmd output: %s", string(output))
 	if err != nil {
 		log.Printf("sqlcmd output: %s", string(output))
@@ -591,23 +555,8 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 	}
 	log.Println("Database restore completed")
 
-	// Set database back to multi user mode
-	log.Println("Setting database back to multi user mode...")
-	query = fmt.Sprintf("ALTER DATABASE %s SET MULTI_USER;", dbName)
-	argsMulti := append(args, "-Q", query)
-	cmd = exec.Command("sqlcmd", argsMulti...)
-	output, err = cmd.CombinedOutput()
-	log.Printf("sqlcmd output: %s", string(output))
-	if err != nil {
-		log.Printf("Warning: failed to set database back to multi user: %v", err)
-		// Don't return error, as restore succeeded
-	} else {
-		if has, txt := sqlOutputHasError(output); has {
-			log.Printf("Warning: setting MULTI_USER reported messages: %s", txt)
-		} else {
-			log.Println("Database set back to multi user mode")
-		}
-	}
+	// // Set database back to multi user mode
+	// Set database back to multi user mode is handled by caller if needed
 
 	return nil
 }
@@ -651,6 +600,32 @@ func sqlOutputHasError(output []byte) (bool, string) {
 		return true, snippet
 	}
 	return false, ""
+}
+
+// dropDatabase drops the given database using sqlcmd. It will attempt to set
+// the database to single user with rollback immediate before dropping to ensure
+// no active connections block the drop.
+func dropDatabase(host, user, pass, dbName string) error {
+	args := []string{"-S", host, "-d", "master"}
+	if user == "" && pass == "" {
+		args = append(args, "-E")
+	} else {
+		args = append(args, "-U", user, "-P", pass)
+	}
+
+	// Set single user with rollback immediate, then drop database
+	cmdText := fmt.Sprintf("ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE %s;", dbName, dbName)
+	args = append(args, "-Q", cmdText)
+	cmd := exec.Command("sqlcmd", args...)
+	output, err := cmd.CombinedOutput()
+	log.Printf("sqlcmd output (dropDatabase): %s", string(output))
+	if err != nil {
+		return fmt.Errorf("sqlcmd error while dropping database: %v", err)
+	}
+	if has, txt := sqlOutputHasError(output); has {
+		return fmt.Errorf("drop database reported errors: %s", txt)
+	}
+	return nil
 }
 
 // GetParentFolderName returns the name of the first parent folder for the file.
