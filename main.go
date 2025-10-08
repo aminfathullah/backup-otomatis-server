@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -102,7 +103,7 @@ func main() {
 	// Process each file
 	for i, file := range files {
 		log.Printf("Processing file %d/%d: %s (ID: %s)", i+1, len(files), file.Name, file.Id)
-	err := processFile(srv, sheetsSrv, spreadsheetID, file, dbHost, dbUser, dbPass, dbName, sevenZPassword, updateQuery, quarantineFolderID)
+		err := processFile(srv, sheetsSrv, spreadsheetID, file, dbHost, dbUser, dbPass, dbName, sevenZPassword, updateQuery, quarantineFolderID)
 		if err != nil {
 			log.Printf("Error processing file %s: %v", file.Name, err)
 			continue
@@ -110,7 +111,7 @@ func main() {
 		log.Printf("Successfully processed file %s", file.Name)
 
 		// After successful processing, drop the restored database to free space.
-		if derr := dropDatabase(dbHost, dbUser, dbPass, dbName); derr != nil {
+		if derr := dropDatabase(dbHost, dbUser, dbPass); derr != nil {
 			log.Printf("Warning: failed to drop database %s after processing %s: %v", dbName, file.Name, derr)
 		} else {
 			log.Printf("Dropped database %s after processing %s", dbName, file.Name)
@@ -118,6 +119,22 @@ func main() {
 	}
 
 	log.Println("Backup-otomatis application completed")
+
+	// Optionally empty the quarantine folder based on environment settings.
+	emptyQuarantineStr := os.Getenv("EMPTY_QUARANTINE")
+	if strings.EqualFold(emptyQuarantineStr, "true") {
+		// parse options
+		deleteAll := strings.EqualFold(os.Getenv("QUARANTINE_DELETE_ALL"), "true")
+		maxAgeHours := 24 * 7 // default: 7 days
+		if v := os.Getenv("QUARANTINE_MAX_AGE_HOURS"); v != "" {
+			if pv, err := strconv.Atoi(v); err == nil && pv >= 0 {
+				maxAgeHours = pv
+			}
+		}
+		if err := emptyQuarantine(srv, sheetsSrv, quarantineFolderID, deleteAll, maxAgeHours); err != nil {
+			log.Printf("Warning: failed to empty quarantine folder %s: %v", quarantineFolderID, err)
+		}
+	}
 }
 
 func getFilesFromFolder(srv *drive.Service, dbName string) ([]*drive.File, error) {
@@ -175,27 +192,49 @@ func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID st
 
 	grantPermissions(bakFile, dbHost)
 
-	err = restoreDB(dbHost, dbUser, dbPass, dbName, bakFile)
+	err = restoreDB(dbHost, dbUser, dbPass, bakFile)
 	if err != nil {
-		if quarantineFolderID != "" {
-			// rename the file to include parent folder name instead of dbName
-			parentName, pErr := getParentFolderName(srv, file)
-			if pErr == nil && parentName != "" {
-				newName := strings.Replace(file.Name, dbName, parentName, -1)
-				if rErr := renameDriveFile(srv, file.Id, newName); rErr != nil {
-					log.Printf("Warning: failed to rename file %s before quarantine: %v", file.Name, rErr)
+		// If restore failed because the database was in use (exclusive access could not be obtained),
+		// attempt to force-drop the database and retry once.
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "exclusive access could not be obtained") || strings.Contains(lower, "msg 3101") || strings.Contains(lower, "database is in use") {
+			log.Printf("Restore failed due to database in use: %v. Attempting force drop and retry...", err)
+			if derr := dropDatabase(dbHost, dbUser, dbPass); derr != nil {
+				log.Printf("Warning: failed to drop database: %v", derr)
+			} else {
+				// small pause before retrying
+				time.Sleep(3 * time.Second)
+				rerr := restoreDB(dbHost, dbUser, dbPass, bakFile)
+				if rerr == nil {
+					log.Printf("Restore succeeded after dropping database %s", dbName)
 				} else {
-					log.Printf("Renamed file %s -> %s before moving to quarantine", file.Name, newName)
-					file.Name = newName
+					log.Printf("Retry restore failed: %v", rerr)
+					err = rerr
 				}
 			}
-			if mErr := moveFileToFolder(srv, file.Id, quarantineFolderID); mErr != nil {
-				log.Printf("Warning: failed to move file %s to quarantine: %v", file.Name, mErr)
-			} else {
-				log.Printf("Moved file %s to quarantine folder %s", file.Name, quarantineFolderID)
-			}
 		}
-		return err
+
+		if err != nil {
+			if quarantineFolderID != "" {
+				// rename the file to include parent folder name instead of dbName
+				parentName, pErr := getParentFolderName(srv, file)
+				if pErr == nil && parentName != "" {
+					newName := strings.Replace(file.Name, dbName, parentName, -1)
+					if rErr := renameDriveFile(srv, file.Id, newName); rErr != nil {
+						log.Printf("Warning: failed to rename file %s before quarantine: %v", file.Name, rErr)
+					} else {
+						log.Printf("Renamed file %s -> %s before moving to quarantine", file.Name, newName)
+						file.Name = newName
+					}
+				}
+				if mErr := moveFileToFolder(srv, file.Id, quarantineFolderID); mErr != nil {
+					log.Printf("Warning: failed to move file %s to quarantine: %v", file.Name, mErr)
+				} else {
+					log.Printf("Moved file %s to quarantine folder %s", file.Name, quarantineFolderID)
+				}
+			}
+			return err
+		}
 	}
 
 	err = runUpdateQuery(dbHost, dbUser, dbPass, dbName, updateQuery)
@@ -442,6 +481,56 @@ func renameDriveFile(srv *drive.Service, fileID, newName string) error {
 	return nil
 }
 
+// emptyQuarantine lists files in the specified quarantine folder and deletes them
+// according to the options. If deleteAll is true, all files are removed. Otherwise
+// files older than maxAgeHours are deleted. For each deletion, the spreadsheet is
+// updated via deleteFileAndUpdateSpreadsheet.
+func emptyQuarantine(srv *drive.Service, sheetsSrv *sheets.Service, quarantineFolderID string, deleteAll bool, maxAgeHours int) error {
+	if quarantineFolderID == "" {
+		return fmt.Errorf("no quarantine folder configured")
+	}
+	// list files in folder
+	q := fmt.Sprintf("trashed = false and '%s' in parents and mimeType != 'application/vnd.google-apps.folder'", quarantineFolderID)
+	pageToken := ""
+	for {
+		req := srv.Files.List().Q(q).Fields("nextPageToken, files(id, name, createdTime, size, parents)")
+		if pageToken != "" {
+			req = req.PageToken(pageToken)
+		}
+		resp, err := req.Do()
+		if err != nil {
+			return fmt.Errorf("failed to list quarantine files: %v", err)
+		}
+		for _, f := range resp.Files {
+			deleteIt := deleteAll
+			if !deleteAll {
+				ct, err := time.Parse(time.RFC3339, f.CreatedTime)
+				if err != nil {
+					// unable to parse time; skip deletion of this file
+					log.Printf("Warning: unable to parse createdTime for %s: %v", f.Name, err)
+					continue
+				}
+				if time.Since(ct) >= time.Duration(maxAgeHours)*time.Hour {
+					deleteIt = true
+				}
+			}
+			if deleteIt {
+				// call deleteFileAndUpdateSpreadsheet to delete and update sheet
+				if err := deleteFileAndUpdateSpreadsheet(srv, sheetsSrv, os.Getenv("SPREADSHEET_ID"), f); err != nil {
+					log.Printf("Warning: failed to delete quarantine file %s: %v", f.Name, err)
+				} else {
+					log.Printf("Deleted quarantine file: %s", f.Name)
+				}
+			}
+		}
+		if resp.NextPageToken == "" {
+			break
+		}
+		pageToken = resp.NextPageToken
+	}
+	return nil
+}
+
 func downloadFile(srv *drive.Service, fileID, destPath string) error {
 	resp, err := srv.Files.Get(fileID).Download()
 	if err != nil {
@@ -495,7 +584,8 @@ func findBakFile(dir string) (string, error) {
 	return bakFile, nil
 }
 
-func restoreDB(host, user, pass, dbName, bakPath string) error {
+func restoreDB(host, user, pass, bakPath string) error {
+	dbName := "Temp"
 	args := []string{"-S", host, "-d", "master"}
 	if user == "" && pass == "" {
 		args = append(args, "-E")
@@ -645,7 +735,8 @@ func sqlOutputHasError(output []byte) (bool, string) {
 // dropDatabase drops the given database using sqlcmd. It will attempt to set
 // the database to single user with rollback immediate before dropping to ensure
 // no active connections block the drop.
-func dropDatabase(host, user, pass, dbName string) error {
+func dropDatabase(host, user, pass string) error {
+	dbName := "Temp"
 	args := []string{"-S", host, "-d", "master"}
 	if user == "" && pass == "" {
 		args = append(args, "-E")
