@@ -51,6 +51,7 @@ func main() {
 	dbName := os.Getenv("DB_NAME")
 	sevenZPassword := os.Getenv("SEVENZ_PASSWORD")
 	updateQuery := os.Getenv("UPDATE_QUERY")
+	quarantineFolderID := os.Getenv("QUARANTINE_FOLDER_ID")
 	serviceAccountFile := os.Getenv("SERVICE_ACCOUNT_FILE")
 	spreadsheetID := os.Getenv("SPREADSHEET_ID")
 
@@ -101,7 +102,7 @@ func main() {
 	// Process each file
 	for i, file := range files {
 		log.Printf("Processing file %d/%d: %s (ID: %s)", i+1, len(files), file.Name, file.Id)
-		err := processFile(srv, sheetsSrv, spreadsheetID, file, dbHost, dbUser, dbPass, dbName, sevenZPassword, updateQuery)
+		err := processFile(srv, sheetsSrv, spreadsheetID, file, dbHost, dbUser, dbPass, dbName, sevenZPassword, updateQuery, quarantineFolderID)
 		if err != nil {
 			log.Printf("Error processing file %s: %v", file.Name, err)
 			continue
@@ -130,7 +131,7 @@ func getFilesFromFolder(srv *drive.Service) ([]*drive.File, error) {
 	return fileList.Files, nil
 }
 
-func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID string, file *drive.File, dbHost, dbUser, dbPass, dbName, password, updateQuery string) error {
+func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID string, file *drive.File, dbHost, dbUser, dbPass, dbName, password, updateQuery, quarantineFolderID string) error {
 	log.Printf("Starting processing for file: %s", file.Name)
 
 	if file.Size < minFileSize {
@@ -153,30 +154,22 @@ func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID st
 	// Returns:
 	//   - error: any error encountered during deletion.
 	if err != nil {
-		if shouldDelete(file) {
-			// createTempDir creates a temporary directory for file processing.
-			//
-			// Returns:
-			//   - string: path to the created temporary directory.
-			//   - error: any error encountered during creation.
-			deleteFileAndUpdateSpreadsheet(srv, sheetsSrv, spreadsheetID, file)
+		// If quarantineFolderID is set, move the Drive file there for later inspection.
+		if quarantineFolderID != "" {
+			if mErr := moveFileToFolder(srv, file.Id, quarantineFolderID); mErr != nil {
+				log.Printf("Warning: failed to move file %s to quarantine: %v", file.Name, mErr)
+			} else {
+				log.Printf("Moved file %s to quarantine folder %s", file.Name, quarantineFolderID)
+			}
 		} else {
-			log.Printf("File %s is less than 10 minutes old, skipping deletion", file.Name)
+			if shouldDelete(file) {
+				if dErr := deleteFileAndUpdateSpreadsheet(srv, sheetsSrv, spreadsheetID, file); dErr != nil {
+					log.Printf("Warning: failed to delete small file %s: %v", file.Name, dErr)
+				}
+			} else {
+				log.Printf("File %s is less than 10 minutes old, skipping deletion", file.Name)
+			}
 		}
-		// downloadAndExtract downloads a file from Google Drive and extracts the 7z archive.
-		//
-		// It downloads the file to a temporary location, extracts it using the provided password,
-		// and locates the .bak file within the extracted contents.
-		//
-		// Parameters:
-		//   - srv: Google Drive service client.
-		//   - file: the file to download.
-		//   - tempDir: temporary directory for operations.
-		//   - password: password for 7z extraction.
-		//
-		// Returns:
-		//   - string: path to the extracted .bak file.
-		//   - error: any error encountered during download or extraction.
 		return err
 	}
 
@@ -184,6 +177,13 @@ func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID st
 
 	err = restoreDB(dbHost, dbUser, dbPass, dbName, bakFile)
 	if err != nil {
+		if quarantineFolderID != "" {
+			if mErr := moveFileToFolder(srv, file.Id, quarantineFolderID); mErr != nil {
+				log.Printf("Warning: failed to move file %s to quarantine: %v", file.Name, mErr)
+			} else {
+				log.Printf("Moved file %s to quarantine folder %s", file.Name, quarantineFolderID)
+			}
+		}
 		return err
 	}
 
@@ -398,6 +398,25 @@ func deleteFileAndUpdateSpreadsheet(srv *drive.Service, sheetsSrv *sheets.Servic
 		} else {
 			log.Printf("Spreadsheet updated for Kab=%s with Susenas=%s", parentName, createdStr)
 		}
+	}
+	return nil
+}
+
+// moveFileToFolder moves a Drive file to a different folder by updating its parents.
+// It will set the parent to the quarantine folder and remove existing parents.
+func moveFileToFolder(srv *drive.Service, fileID, quarantineFolderID string) error {
+	// Get current parents
+	f, err := srv.Files.Get(fileID).Fields("parents").Do()
+	if err != nil {
+		return fmt.Errorf("failed to get file parents: %v", err)
+	}
+	var remove string
+	if len(f.Parents) > 0 {
+		remove = strings.Join(f.Parents, ",")
+	}
+	_, err = srv.Files.Update(fileID, &drive.File{}).AddParents(quarantineFolderID).RemoveParents(remove).Fields("id, parents").Do()
+	if err != nil {
+		return fmt.Errorf("failed to move file to quarantine: %v", err)
 	}
 	return nil
 }
