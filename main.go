@@ -93,7 +93,7 @@ func main() {
 
 	// Get files from folder
 	log.Println("Retrieving files from Google Drive...")
-	files, err := getFilesFromFolder(srv)
+	files, err := getFilesFromFolder(srv, dbName)
 	if err != nil {
 		log.Fatalf("Unable to get files: %v", err)
 	}
@@ -102,7 +102,7 @@ func main() {
 	// Process each file
 	for i, file := range files {
 		log.Printf("Processing file %d/%d: %s (ID: %s)", i+1, len(files), file.Name, file.Id)
-		err := processFile(srv, sheetsSrv, spreadsheetID, file, dbHost, dbUser, dbPass, dbName, sevenZPassword, updateQuery, quarantineFolderID)
+		err := processFile(srv, sheetsSrv, spreadsheetID, file, dbHost, dbUser, dbPass, sevenZPassword, updateQuery, quarantineFolderID)
 		if err != nil {
 			log.Printf("Error processing file %s: %v", file.Name, err)
 			continue
@@ -110,18 +110,18 @@ func main() {
 		log.Printf("Successfully processed file %s", file.Name)
 
 		// After successful processing, drop the restored database to free space.
-		if derr := dropDatabase(dbHost, dbUser, dbPass, dbName); derr != nil {
-			log.Printf("Warning: failed to drop database %s after processing %s: %v", dbName, file.Name, derr)
+		if derr := dropDatabase(dbHost, dbUser, dbPass); derr != nil {
+			log.Printf("Warning: failed to drop database after processing %s: %v", file.Name, derr)
 		} else {
-			log.Printf("Dropped database %s after processing %s", dbName, file.Name)
+			log.Printf("Dropped database after processing %s", file.Name)
 		}
 	}
 
 	log.Println("Backup-otomatis application completed")
 }
 
-func getFilesFromFolder(srv *drive.Service) ([]*drive.File, error) {
-	query := "trashed = false and mimeType != 'application/vnd.google-apps.folder' and name contains 'Susenas2025M'"
+func getFilesFromFolder(srv *drive.Service, dbName string) ([]*drive.File, error) {
+	query := fmt.Sprintf("trashed = false and mimeType != 'application/vnd.google-apps.folder' and name contains '%s'", dbName)
 	log.Printf("Executing Drive query: %s", query)
 	fileList, err := srv.Files.List().Q(query).PageSize(1000).Fields("nextPageToken, files(id, name, createdTime, size, parents)").OrderBy("createdTime").Do()
 	if err != nil {
@@ -131,7 +131,7 @@ func getFilesFromFolder(srv *drive.Service) ([]*drive.File, error) {
 	return fileList.Files, nil
 }
 
-func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID string, file *drive.File, dbHost, dbUser, dbPass, dbName, password, updateQuery, quarantineFolderID string) error {
+func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID string, file *drive.File, dbHost, dbUser, dbPass, password, updateQuery, quarantineFolderID string) error {
 	log.Printf("Starting processing for file: %s", file.Name)
 
 	if file.Size < minFileSize {
@@ -175,7 +175,7 @@ func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID st
 
 	grantPermissions(bakFile, dbHost)
 
-	err = restoreDB(dbHost, dbUser, dbPass, dbName, bakFile)
+	err = restoreDB(dbHost, dbUser, dbPass, bakFile)
 	if err != nil {
 		if quarantineFolderID != "" {
 			if mErr := moveFileToFolder(srv, file.Id, quarantineFolderID); mErr != nil {
@@ -187,7 +187,7 @@ func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID st
 		return err
 	}
 
-	err = runUpdateQuery(dbHost, dbUser, dbPass, dbName, updateQuery)
+	err = runUpdateQuery(dbHost, dbUser, dbPass, updateQuery)
 	if err != nil {
 		// grantPermissions grants SQL Server service permissions on the backup file and its directory.
 		//
@@ -474,7 +474,7 @@ func findBakFile(dir string) (string, error) {
 	return bakFile, nil
 }
 
-func restoreDB(host, user, pass, dbName, bakPath string) error {
+func restoreDB(host, user, pass, bakPath string) error {
 	args := []string{"-S", host, "-d", "master"}
 	if user == "" && pass == "" {
 		args = append(args, "-E")
@@ -547,19 +547,19 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 
 	// Use detected logical names or sensible defaults
 	if dataLogical == "" {
-		dataLogical = dbName
+		dataLogical = "Temp"
 	}
 	if logLogical == "" {
-		logLogical = dbName + "_log"
+		logLogical = "Temp_log"
 	}
 
 	// Set database to single user mode to close all other connections
 	// Database set to single user mode is handled by caller if needed
 
 	// Build RESTORE ... WITH MOVE statement
-	mdfTarget := filepath.Join(dataPath, dbName+".mdf")
-	ldfTarget := filepath.Join(dataPath, dbName+"_log.ldf")
-	query := fmt.Sprintf("RESTORE DATABASE %s FROM DISK='%s' WITH REPLACE, MOVE '%s' TO '%s', MOVE '%s' TO '%s'", dbName, bakPath, dataLogical, mdfTarget, logLogical, ldfTarget)
+	mdfTarget := filepath.Join(dataPath, "Temp.mdf")
+	ldfTarget := filepath.Join(dataPath, "Temp_log.ldf")
+	query := fmt.Sprintf("RESTORE DATABASE %s FROM DISK='%s' WITH REPLACE, MOVE '%s' TO '%s', MOVE '%s' TO '%s'", "Temp", bakPath, dataLogical, mdfTarget, logLogical, ldfTarget)
 	argsRestore := append(args, "-Q", query)
 	cmd = exec.Command("sqlcmd", argsRestore...)
 	output, err := cmd.CombinedOutput()
@@ -580,8 +580,8 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 	return nil
 }
 
-func runUpdateQuery(host, user, pass, dbName, query string) error {
-	args := []string{"-S", host, "-d", dbName}
+func runUpdateQuery(host, user, pass, query string) error {
+	args := []string{"-S", host, "-d", "Temp"}
 	if user == "" && pass == "" {
 		args = append(args, "-E")
 	} else {
@@ -624,7 +624,7 @@ func sqlOutputHasError(output []byte) (bool, string) {
 // dropDatabase drops the given database using sqlcmd. It will attempt to set
 // the database to single user with rollback immediate before dropping to ensure
 // no active connections block the drop.
-func dropDatabase(host, user, pass, dbName string) error {
+func dropDatabase(host, user, pass string) error {
 	args := []string{"-S", host, "-d", "master"}
 	if user == "" && pass == "" {
 		args = append(args, "-E")
@@ -633,7 +633,7 @@ func dropDatabase(host, user, pass, dbName string) error {
 	}
 
 	// Set single user with rollback immediate, then drop database
-	cmdText := fmt.Sprintf("ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE %s;", dbName, dbName)
+	cmdText := fmt.Sprintf("ALTER DATABASE %s SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE %s;", "Temp", "Temp")
 	args = append(args, "-Q", cmdText)
 	cmd := exec.Command("sqlcmd", args...)
 	output, err := cmd.CombinedOutput()
