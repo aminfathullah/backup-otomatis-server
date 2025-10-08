@@ -494,6 +494,12 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to run RESTORE FILELISTONLY: %v", err)
 	}
+	// If sqlcmd returned output that looks like an error message (for example
+	// messages starting with "Msg" or containing "error"/"failed"), treat
+	// it as a failure even if the process exit code is 0.
+	if has, txt := sqlOutputHasError(out); has {
+		return fmt.Errorf("RESTORE FILELISTONLY reported error: %s", txt)
+	}
 	listOut := strings.TrimSpace(string(out))
 	var dataLogical, logLogical string
 	if listOut != "" {
@@ -527,6 +533,12 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 	if err != nil {
 		// If we can't get the instance path, fall back to the backup's directory
 		log.Printf("warning: failed to get instance data path: %v", err)
+	} else {
+		// check output for error-like content
+		if has, txt := sqlOutputHasError(out); has {
+			log.Printf("warning: RESTORE PATH query reported messages: %s", txt)
+			// continue; don't abort here because we can still fall back to bak dir
+		}
 	}
 	dataPath := strings.TrimSpace(string(out))
 	// sqlcmd may return the literal "NULL" when the property is not set.
@@ -556,6 +568,9 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to set database to single user: %v", err)
 	}
+	if has, txt := sqlOutputHasError(output); has {
+		return fmt.Errorf("failed to set database to single user (sqlcmd messages): %s", txt)
+	}
 	log.Println("Database set to single user mode")
 
 	// Build RESTORE ... WITH MOVE statement
@@ -570,6 +585,10 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 		log.Printf("sqlcmd output: %s", string(output))
 		return fmt.Errorf("restore failed: %v", err)
 	}
+	if has, txt := sqlOutputHasError(output); has {
+		log.Printf("sqlcmd output: %s", string(output))
+		return fmt.Errorf("restore reported errors: %s", txt)
+	}
 	log.Println("Database restore completed")
 
 	// Set database back to multi user mode
@@ -583,7 +602,11 @@ func restoreDB(host, user, pass, dbName, bakPath string) error {
 		log.Printf("Warning: failed to set database back to multi user: %v", err)
 		// Don't return error, as restore succeeded
 	} else {
-		log.Println("Database set back to multi user mode")
+		if has, txt := sqlOutputHasError(output); has {
+			log.Printf("Warning: setting MULTI_USER reported messages: %s", txt)
+		} else {
+			log.Println("Database set back to multi user mode")
+		}
 	}
 
 	return nil
@@ -600,11 +623,34 @@ func runUpdateQuery(host, user, pass, dbName, query string) error {
 	// log.Printf("Running sqlcmd with args: %v", args)
 	cmd := exec.Command("sqlcmd", args...)
 	output, err := cmd.CombinedOutput()
+	log.Printf("sqlcmd output: %s", string(output))
 	if err != nil {
-		log.Printf("sqlcmd output: %s", string(output))
 		return err
 	}
+	if has, txt := sqlOutputHasError(output); has {
+		return fmt.Errorf("sql update reported error: %s", txt)
+	}
 	return nil
+}
+
+// sqlOutputHasError inspects sqlcmd output for common SQL Server error patterns.
+// It returns true and a shortened text snippet when it detects likely errors.
+func sqlOutputHasError(output []byte) (bool, string) {
+	s := string(output)
+	if s == "" {
+		return false, ""
+	}
+	lower := strings.ToLower(s)
+	// Look for SQL Server message prefix (e.g., "Msg 12345") or common error words.
+	if strings.Contains(s, "Msg ") || strings.Contains(lower, "error") || strings.Contains(lower, "failed") || strings.Contains(lower, "cannot") {
+		// return a trimmed snippet (first 1024 chars) to avoid huge error messages
+		snippet := s
+		if len(snippet) > 1024 {
+			snippet = snippet[:1024] + "..."
+		}
+		return true, snippet
+	}
+	return false, ""
 }
 
 // GetParentFolderName returns the name of the first parent folder for the file.
