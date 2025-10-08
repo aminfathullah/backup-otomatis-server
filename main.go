@@ -146,7 +146,7 @@ func main() {
 func getFilesFromFolder(srv *drive.Service) ([]*drive.File, error) {
 	query := "trashed = false and mimeType != 'application/vnd.google-apps.folder' and name contains 'Susenas2025M'"
 	log.Printf("Executing Drive query: %s", query)
-	fileList, err := srv.Files.List().Q(query).Fields("files(id, name, createdTime, size, parents)").OrderBy("createdTime").Do()
+	fileList, err := srv.Files.List().Q(query).PageSize(1000).Fields("nextPageToken, files(id, name, createdTime, size, parents)").OrderBy("createdTime").Do()
 	if err != nil {
 		return nil, fmt.Errorf("Drive API error: %v", err)
 	}
@@ -253,23 +253,23 @@ func processFile(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID st
 }
 func deleteSmallFile(srv *drive.Service, file *drive.File) error {
 	log.Printf("File %s is smaller than 10KB (%d bytes), deleting from Drive", file.Name, file.Size)
-	// err := srv.Files.Delete(file.Id).Do()
-	// // deleteFileAndUpdateSpreadsheet deletes a file from Google Drive and updates the tracking spreadsheet.
-	// //
-	// // It retrieves the parent folder name, formats the creation time, and either updates an existing
-	// // row in the spreadsheet or appends a new one.
-	// //
-	// // Parameters:
-	// //   - srv: Google Drive service client.
-	// //   - sheetsSrv: Google Sheets service client.
-	// //   - spreadsheetID: ID of the Google Sheet.
-	// //   - file: the file being processed.
-	// //
-	// // Returns:
-	// //   - error: any error encountered during deletion or spreadsheet update.
-	// if err != nil {
-	// 	return fmt.Errorf("failed to delete small file: %v", err)
-	// }
+	err := srv.Files.Delete(file.Id).Do()
+	// deleteFileAndUpdateSpreadsheet deletes a file from Google Drive and updates the tracking spreadsheet.
+	//
+	// It retrieves the parent folder name, formats the creation time, and either updates an existing
+	// row in the spreadsheet or appends a new one.
+	//
+	// Parameters:
+	//   - srv: Google Drive service client.
+	//   - sheetsSrv: Google Sheets service client.
+	//   - spreadsheetID: ID of the Google Sheet.
+	//   - file: the file being processed.
+	//
+	// Returns:
+	//   - error: any error encountered during deletion or spreadsheet update.
+	if err != nil {
+		return fmt.Errorf("failed to delete small file: %v", err)
+	}
 	log.Println("Small file deleted from Google Drive")
 	return nil
 }
@@ -405,10 +405,10 @@ func formatCreatedTime(createdTimeStr string) string {
 
 func deleteFileAndUpdateSpreadsheet(srv *drive.Service, sheetsSrv *sheets.Service, spreadsheetID string, file *drive.File) error {
 	log.Printf("Deleting file from Google Drive: %s", file.Id)
-	// err := srv.Files.Delete(file.Id).Do()
-	// if err != nil {
-	// 	return fmt.Errorf("failed to delete Drive file: %v", err)
-	// }
+	err := srv.Files.Delete(file.Id).Do()
+	if err != nil {
+		return fmt.Errorf("failed to delete Drive file: %v", err)
+	}
 	log.Println("File deleted from Google Drive")
 
 	parentName, pErr := getParentFolderName(srv, file)
@@ -620,7 +620,7 @@ func runUpdateQuery(host, user, pass, dbName, query string) error {
 //   - string: name of the parent folder, or empty string if not found.
 //   - error: any error encountered during the API calls.
 func getParentFolderName(srv *drive.Service, file *drive.File) (string, error) {
-	if file.Parents != nil && len(file.Parents) > 0 {
+	if len(file.Parents) > 0 {
 		parentID := file.Parents[0]
 		f, err := srv.Files.Get(parentID).Fields("id, name").Do()
 		if err != nil {
@@ -633,7 +633,7 @@ func getParentFolderName(srv *drive.Service, file *drive.File) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if fi.Parents != nil && len(fi.Parents) > 0 {
+	if len(fi.Parents) > 0 {
 		p, err := srv.Files.Get(fi.Parents[0]).Fields("name").Do()
 		if err != nil {
 			return "", err
